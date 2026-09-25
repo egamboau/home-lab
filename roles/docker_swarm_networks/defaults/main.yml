@@ -3,3 +3,6 @@ docker_swarm_networks:
   - name: public-ingress
     driver: overlay
     attachable: true
+  - name: jenkins-agents
+    driver: overlay
+    attachable: true

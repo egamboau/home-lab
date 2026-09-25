@@ -79,13 +79,14 @@
       ansible.builtin.include_role:
         name: cloudflared
 
-    - name: Instalar Jenkins en el manager
-      ansible.builtin.include_role:
-        name: jenkins
-
     - name: Instalar el registro Docker local en el manager
       ansible.builtin.include_role:
         name: local_docker_registry
+        public: true
+
+    - name: Migrar Jenkins a Swarm y publicar sus agentes
+      ansible.builtin.include_role:
+        name: jenkins
 
     - name: Obtener el token para incorporar workers
       community.docker.docker_swarm_info:

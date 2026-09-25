@@ -64,3 +64,15 @@
       OTEL_TRACES_EXPORTER: 'none'
     restart_policy: always
     state: started
+
+- name: Esperar a que el registro Docker local responda
+  ansible.builtin.uri:
+    url: 'http://{{ local_docker_registry_address }}:{{ local_docker_registry_port }}/v2/'
+    status_code: 200
+    return_content: false
+  register: local_docker_registry_ready
+  until: local_docker_registry_ready.status | default(0) == 200
+  retries: 12
+  delay: 5
+  check_mode: false
+  changed_when: false

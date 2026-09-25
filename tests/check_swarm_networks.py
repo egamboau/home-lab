@@ -10,6 +10,7 @@ cloudflared = yaml.safe_load((root / 'roles/cloudflared/tasks/main.yml').read_te
 
 assert defaults['docker_swarm_networks'] == [
     {'name': 'public-ingress', 'driver': 'overlay', 'attachable': True},
+    {'name': 'jenkins-agents', 'driver': 'overlay', 'attachable': True},
 ]
 create = tasks[-1]['community.docker.docker_network']
 assert create['scope'] == 'swarm' and create['appends'] is True and create['state'] == 'present'

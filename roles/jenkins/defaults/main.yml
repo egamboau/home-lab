@@ -1,2 +1,18 @@
 ---
-jenkins_repository_key_url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+jenkins_image: jenkins/jenkins:lts-jdk21
+jenkins_home_directory: /var/lib/jenkins
+jenkins_http_port: 8080
+jenkins_agent_port: 50000
+jenkins_agent_network: jenkins-agents
+jenkins_startup_retries: 60
+jenkins_controller_build_directory: /etc/jenkins-controller-image
+jenkins_controller_tag: lts-jdk21
+jenkins_agent_build_directory: /etc/jenkins-agent-images
+jenkins_agent_registry: '{{ local_docker_registry_address }}:{{ local_docker_registry_port }}'
+jenkins_agent_rsync_tag: '1'
+jenkins_agent_rsync_uid: ''
+jenkins_agent_rsync_gid: ''
+jenkins_agent_node_version: 24.21.0
+jenkins_agent_node_sha256: fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+jenkins_agent_node_tag: '24'
+jenkins_agent_platform: linux/amd64

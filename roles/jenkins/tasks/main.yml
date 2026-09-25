@@ -27,44 +27,345 @@
     daemon_reload: true
   when: old_stack_updater_files.changed
 
-- name: Instalar Java antes de Jenkins
-  ansible.builtin.apt:
-    name:
-      - fontconfig
-      - openjdk-21-jre
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
+- name: Validar la configuración de Jenkins y sus agentes
+  ansible.builtin.assert:
+    that:
+      - jenkins_home_directory is match('^/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$')
+      - jenkins_http_port | int > 0
+      - jenkins_http_port | int < 65536
+      - jenkins_agent_port | int > 0
+      - jenkins_agent_port | int < 65536
+      - jenkins_agent_registry | length > 0
+      - ansible_facts.architecture == 'x86_64'
+    fail_msg: Jenkins y las imágenes de agentes requieren rutas absolutas, puertos válidos y un manager amd64.
 
-- name: Descargar la clave del repositorio Jenkins LTS
-  ansible.builtin.get_url:
-    url: '{{ jenkins_repository_key_url }}'
-    dest: /etc/apt/keyrings/jenkins-keyring.asc
-    mode: '0644'
+- name: Comprobar si existe el usuario Jenkins del paquete nativo
+  ansible.builtin.command: id -u jenkins
+  register: jenkins_existing_user
+  changed_when: false
+  failed_when: false
+  check_mode: false
 
-- name: Configurar el repositorio Jenkins LTS
-  ansible.builtin.copy:
-    dest: /etc/apt/sources.list.d/jenkins.list
-    mode: '0644'
-    content: |
-      deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
-
-- name: Instalar o actualizar Jenkins
-  ansible.builtin.apt:
+- name: Crear el grupo Jenkins en instalaciones nuevas
+  ansible.builtin.group:
     name: jenkins
-    state: latest
-    update_cache: true
+    system: true
+    state: present
+  when: jenkins_existing_user.rc != 0
 
-- name: Permitir que Jenkins use Docker
+- name: Crear el usuario Jenkins en instalaciones nuevas
   ansible.builtin.user:
     name: jenkins
-    groups: docker
-    append: true
-  register: jenkins_docker_access
+    group: jenkins
+    home: '{{ jenkins_home_directory }}'
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: true
+    state: present
+  when: jenkins_existing_user.rc != 0
 
-- name: Habilitar Jenkins
-  ansible.builtin.systemd_service:
-    name: jenkins
-    enabled: true
-    daemon_reload: true
-    state: "{{ 'restarted' if jenkins_docker_access.changed else 'started' }}"
+- name: Conservar el home existente de Jenkins
+  ansible.builtin.file:
+    path: '{{ jenkins_home_directory }}'
+    state: directory
+    owner: jenkins
+    group: jenkins
+
+- name: Obtener el UID de Jenkins
+  ansible.builtin.command: id -u jenkins
+  register: jenkins_uid
+  changed_when: false
+  check_mode: false
+
+- name: Obtener el GID de Jenkins
+  ansible.builtin.command: id -g jenkins
+  register: jenkins_gid
+  changed_when: false
+  check_mode: false
+
+- name: Obtener el GID del socket Docker
+  ansible.builtin.command: getent group docker
+  register: jenkins_docker_group
+  changed_when: false
+  check_mode: false
+
+- name: Validar el grupo Docker
+  ansible.builtin.assert:
+    that:
+      - jenkins_docker_group.stdout.split(':') | length == 4
+      - jenkins_docker_group.stdout.split(':')[2] is match('^[0-9]+$')
+    fail_msg: No se pudo obtener el GID del grupo docker para montar su socket en Jenkins.
+
+- name: Crear el contexto remoto de las imágenes de agentes
+  ansible.builtin.file:
+    path: '{{ jenkins_agent_build_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Copiar el Dockerfile de los agentes al manager
+  ansible.builtin.copy:
+    src: '{{ role_path }}/../../docker/jenkins-agents/Dockerfile'
+    dest: '{{ jenkins_agent_build_directory }}/Dockerfile'
+    owner: root
+    group: root
+    mode: '0644'
+  register: jenkins_agent_dockerfile
+
+- name: Registrar la configuración de build de los agentes
+  ansible.builtin.copy:
+    dest: '{{ jenkins_agent_build_directory }}/build-configuration'
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      registry={{ jenkins_agent_registry }}
+      rsync_tag={{ jenkins_agent_rsync_tag }}
+      rsync_uid={{ jenkins_agent_rsync_uid | default(jenkins_uid.stdout, true) }}
+      rsync_gid={{ jenkins_agent_rsync_gid | default(jenkins_gid.stdout, true) }}
+      node_version={{ jenkins_agent_node_version }}
+      node_sha256={{ jenkins_agent_node_sha256 }}
+      node_tag={{ jenkins_agent_node_tag }}
+      platform={{ jenkins_agent_platform }}
+  register: jenkins_agent_build_configuration
+
+- name: Construir y publicar las imágenes de agentes Jenkins
+  community.docker.docker_image:
+    name: '{{ jenkins_agent_registry }}/jenkins-agent-{{ item.target }}:{{ item.tag }}'
+    source: build
+    push: true
+    force_source: '{{ jenkins_agent_dockerfile.changed or jenkins_agent_build_configuration.changed }}'
+    timeout: 1800
+    build:
+      path: '{{ jenkins_agent_build_directory }}'
+      dockerfile: Dockerfile
+      target: '{{ item.target }}'
+      platform: '{{ jenkins_agent_platform }}'
+      pull: true
+      args: '{{ item.args }}'
+  loop:
+    - target: rsync
+      tag: '{{ jenkins_agent_rsync_tag }}'
+      args:
+        JENKINS_UID: '{{ jenkins_agent_rsync_uid | default(jenkins_uid.stdout, true) }}'
+        JENKINS_GID: '{{ jenkins_agent_rsync_gid | default(jenkins_gid.stdout, true) }}'
+    - target: node
+      tag: '{{ jenkins_agent_node_tag }}'
+      args:
+        TARGETARCH: amd64
+        NODE_VERSION: '{{ jenkins_agent_node_version }}'
+        NODE_SHA256: '{{ jenkins_agent_node_sha256 }}'
+  loop_control:
+    label: 'jenkins-agent-{{ item.target }}:{{ item.tag }}'
+
+- name: Detectar el servicio Jenkins nativo
+  ansible.builtin.service_facts:
+
+- name: Determinar si queda pendiente migrar el servicio nativo
+  ansible.builtin.set_fact:
+    jenkins_native_migration_pending: >-
+      {{ 'jenkins.service' in ansible_facts.services
+         and ansible_facts.services['jenkins.service'].state == 'running' }}
+
+- name: Consultar la versión del Jenkins nativo
+  ansible.builtin.command: /usr/bin/jenkins --version
+  register: jenkins_native_version
+  changed_when: false
+  check_mode: false
+  when: jenkins_native_migration_pending
+
+- name: Consultar la imagen del servicio Jenkins existente
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - inspect
+      - jenkins
+  register: jenkins_existing_swarm_service
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Registrar la imagen del servicio Jenkins existente
+  ansible.builtin.set_fact:
+    jenkins_existing_swarm_image: >-
+      {{ (((jenkins_existing_swarm_service.stdout | from_json)[0].Spec.TaskTemplate.ContainerSpec.Image).split('@') | first)
+         if jenkins_existing_swarm_service.rc == 0 else '' }}
+
+- name: Elegir la imagen base compatible para el controller
+  ansible.builtin.set_fact:
+    jenkins_controller_base_image: >-
+      {{ ('jenkins/jenkins:' ~ (jenkins_native_version.stdout_lines | last | trim) ~ '-lts-jdk21')
+         if jenkins_native_migration_pending
+         else (jenkins_existing_swarm_image
+               if jenkins_existing_swarm_image is match('^jenkins/jenkins:')
+               else jenkins_image) }}
+
+- name: Crear el contexto remoto de la imagen del controller
+  ansible.builtin.file:
+    path: '{{ jenkins_controller_build_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Copiar el Dockerfile del controller al manager
+  ansible.builtin.copy:
+    src: '{{ role_path }}/../../docker/jenkins-controller/Dockerfile'
+    dest: '{{ jenkins_controller_build_directory }}/Dockerfile'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Construir y publicar la imagen del controller Jenkins
+  community.docker.docker_image:
+    name: '{{ jenkins_agent_registry }}/jenkins-controller:{{ jenkins_controller_tag }}'
+    source: build
+    push: true
+    force_source: true
+    timeout: 1800
+    build:
+      path: '{{ jenkins_controller_build_directory }}'
+      dockerfile: Dockerfile
+      platform: '{{ jenkins_agent_platform }}'
+      pull: true
+      args:
+        JENKINS_CONTROLLER_IMAGE: '{{ jenkins_controller_base_image }}'
+        JENKINS_UID: '{{ jenkins_uid.stdout }}'
+        JENKINS_GID: '{{ jenkins_gid.stdout }}'
+
+- name: Elegir la imagen publicada para ejecutar Jenkins
+  ansible.builtin.set_fact:
+    jenkins_runtime_image: '{{ jenkins_agent_registry }}/jenkins-controller:{{ jenkins_controller_tag }}'
+
+- name: Consultar la versión del controller en la imagen
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint
+      - java
+      - '{{ jenkins_runtime_image }}'
+      - -jar
+      - /usr/share/jenkins/jenkins.war
+      - --version
+  register: jenkins_container_version
+  changed_when: false
+  check_mode: false
+
+- name: Consultar el UID efectivo del controller en la imagen
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint
+      - id
+      - '{{ jenkins_runtime_image }}'
+      - -u
+  register: jenkins_container_uid
+  changed_when: false
+  check_mode: false
+
+- name: Validar la identidad del usuario Jenkins en la imagen
+  ansible.builtin.assert:
+    that:
+      - jenkins_container_uid.stdout | trim == jenkins_uid.stdout | trim
+    fail_msg: >-
+      La imagen {{ jenkins_runtime_image }} ejecuta Jenkins con UID
+      {{ jenkins_container_uid.stdout | trim }}, pero el home pertenece al UID
+      {{ jenkins_uid.stdout | trim }}.
+
+- name: Evitar actualizar Jenkins durante la migración de runtime
+  ansible.builtin.assert:
+    that: jenkins_container_version.stdout_lines | last | trim == jenkins_native_version.stdout_lines | last | trim
+    fail_msg: >-
+      La imagen {{ jenkins_runtime_image }} contiene Jenkins {{ jenkins_container_version.stdout_lines | last | trim }},
+      pero el servicio nativo usa {{ jenkins_native_version.stdout_lines | last | trim }}.
+      Iguala ambas versiones antes de migrar.
+  when: jenkins_native_migration_pending
+
+- name: Migrar el controller Jenkins al Swarm
+  block:
+    - name: Detener y deshabilitar el Jenkins nativo
+      ansible.builtin.systemd_service:
+        name: jenkins
+        enabled: false
+        state: stopped
+      when: jenkins_native_migration_pending
+
+    - name: Desplegar Jenkins en el nodo que contiene su home
+      community.docker.docker_swarm_service:
+        name: jenkins
+        image: '{{ jenkins_runtime_image }}'
+        resolve_image: true
+        user: jenkins
+        groups:
+          - "{{ jenkins_docker_group.stdout.split(':')[2] }}"
+        env:
+          JENKINS_HOME: /var/jenkins_home
+        networks:
+          - '{{ jenkins_agent_network }}'
+        mounts:
+          - source: '{{ jenkins_home_directory }}'
+            target: /var/jenkins_home
+            type: bind
+          - source: /var/run/docker.sock
+            target: /var/run/docker.sock
+            type: bind
+        publish:
+          - target_port: 8080
+            published_port: '{{ jenkins_http_port | int }}'
+            mode: host
+          - target_port: 50000
+            published_port: '{{ jenkins_agent_port | int }}'
+            mode: host
+        placement:
+          constraints:
+            - 'node.hostname == {{ server_hostname }}'
+          replicas_max_per_node: 1
+        mode: replicated
+        replicas: 1
+        restart_config:
+          condition: any
+          delay: 5s
+        update_config:
+          order: stop-first
+          failure_action: rollback
+        stop_grace_period: 1m
+        state: present
+
+    - name: Esperar a que Jenkins responda después de la migración
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ jenkins_http_port }}/login'
+        status_code:
+          - 200
+          - 403
+        return_content: false
+      register: jenkins_http_check
+      until: jenkins_http_check.status | default(0) in [200, 403]
+      retries: '{{ jenkins_startup_retries }}'
+      delay: 5
+      check_mode: false
+      changed_when: false
+  rescue:
+    - name: Retirar el servicio fallido durante la primera migración
+      community.docker.docker_swarm_service:
+        name: jenkins
+        state: absent
+      when: jenkins_native_migration_pending
+
+    - name: Restaurar el Jenkins nativo si falló la primera migración
+      ansible.builtin.systemd_service:
+        name: jenkins
+        enabled: true
+        state: started
+      when: jenkins_native_migration_pending
+
+    - name: Informar el fallo de la migración de Jenkins
+      ansible.builtin.fail:
+        msg: >-
+          Jenkins no respondió después del despliegue. El servicio nativo se restauró cuando esta era
+          la primera migración; revisa docker service ps jenkins y docker service logs jenkins.

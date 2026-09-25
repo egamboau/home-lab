@@ -50,18 +50,43 @@ el secret en `/run/secrets/cloudflared_token`; el token no se pasa como variable
 de entorno ni como argumento visible del servicio. Al cambiar el archivo,
 Ansible crea una versión nueva del secret y actualiza `cloudflared`.
 
-El manager instala Jenkins LTS como servicio nativo con Java 21. Jenkins escucha
-en el puerto 8080 y conserva su estado en `/var/lib/jenkins`. Tras instalarlo,
-obtén la contraseña inicial y termina el asistente desde la LAN:
+El manager ejecuta Jenkins LTS con Java 21 como servicio de Swarm. El bind mount
+`/var/lib/jenkins:/var/jenkins_home` conserva el Jenkins home existente y una
+restricción `node.hostname` fija el servicio al primer manager, que es el nodo
+que puede ver esa ruta. Publica 8080 para la web y 50000 para agentes inbound.
+También monta `/var/run/docker.sock` para Jenkins Docker Plugin; ese acceso
+equivale a root, así que ejecuta solo jobs confiables y protege Jenkins con
+autenticación.
+
+Jenkins se conecta a la red overlay attachable `jenkins-agents`. Configura el
+campo **Network** de las plantillas `rsync` y `node` del Docker Plugin con ese
+mismo nombre y usa `http://jenkins:8080/` como **Jenkins URL**. Los contenedores
+efímeros se conectan entonces al servicio por DNS interno de Swarm; no necesitan
+conocer la IP del manager. La red es dedicada y no expone los agentes a los
+servicios de `public-ingress`.
+
+En la primera migración, Ansible detecta la versión nativa y usa la imagen
+`jenkins/jenkins:<misma-versión>-lts-jdk21` como base. Luego construye y publica
+`jenkins-controller:lts-jdk21`, remapeando dentro de la imagen el usuario
+`jenkins` al UID/GID existentes. Así Git, SSH y el home conservan la misma
+identidad sin cambiar ownership en `/var/lib/jenkins`. Después construye los
+agentes, detiene systemd y arranca el container. El paquete nativo queda
+instalado pero deshabilitado. Si el nuevo controller no responde, Ansible retira
+el servicio fallido y restaura systemd. Después de la migración,
+`jenkins_image` controla la imagen base de las actualizaciones.
+
+Obtén la contraseña inicial y revisa el servicio desde la LAN:
 
 ```sh
-sudo systemctl status jenkins
 sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+sudo docker service ps jenkins
+sudo docker service logs jenkins
 ```
 
-El usuario `jenkins` pertenece al grupo `docker`, por lo que puede construir
-imágenes y desplegar servicios o stacks desde el manager. Ese acceso equivale a
-root: ejecuta solo jobs confiables y protege Jenkins con autenticación.
+Para volver al servicio nativo durante la ventana inicial, usa una copia
+consistente de `/var/lib/jenkins`, retira el servicio Swarm y habilita systemd.
+No arranques una versión nativa anterior sobre un home ya actualizado por una
+imagen posterior.
 
 También ejecuta `registry:3` como contenedor independiente, escuchando en la IP
 LAN configurada en `swarm_advertise_addr`. Las imágenes persisten en
@@ -86,6 +111,85 @@ Verifica el registro:
 curl http://<SERVER_LAN_IP>:5000/v2/
 curl http://<SERVER_HOSTNAME>.local:5000/v2/
 sudo docker ps --filter name=local-registry
+```
+
+## Agentes efímeros de Jenkins
+
+`docker/jenkins-agents/Dockerfile` define dos plantillas para Jenkins Docker
+Plugin. El controller
+solicita el label `rsync` o `node`, el plugin crea el agente inbound, ejecuta el
+pipeline y elimina el contenedor al terminar:
+
+```text
+Jenkins Controller -> Docker Plugin -> agente efímero -> pipeline -> eliminado
+```
+
+Ambas imágenes usan Jenkins Remoting con JDK 21 como usuario no-root `jenkins`.
+Durante el playbook, Ansible copia ese Dockerfile al primer manager, construye
+los targets `rsync` y `node` y publica sus tags versionados en el registry local
+antes de migrar o actualizar el controller. Solo reconstruye cuando cambia el
+Dockerfile, la configuración de build o falta la imagen local.
+
+Incluyen Docker CLI y Buildx para conectarse a un daemon externo; no incluyen ni
+ejecutan Docker Engine. No guardes claves SSH, tokens del registry ni otras
+credenciales en las imágenes: inyéctalas desde Jenkins durante cada build.
+
+Construye las dos imágenes o un solo target:
+
+```sh
+docker buildx bake -f docker/jenkins-agents/docker-bake.hcl
+docker buildx bake -f docker/jenkins-agents/docker-bake.hcl rsync
+docker buildx bake -f docker/jenkins-agents/docker-bake.hcl node
+```
+
+Por defecto se generan `jenkins-agent-rsync:1` y `jenkins-agent-node:24` para
+`linux/amd64`. Para ajustar el UID/GID del agente rsync a los archivos montados:
+
+```sh
+JENKINS_UID="$(id -u)" JENKINS_GID="$(id -g)" \
+  docker buildx bake -f docker/jenkins-agents/docker-bake.hcl rsync
+```
+
+Los valores deben ser enteros mayores que cero. Un GID existente se reutiliza;
+el build falla si el UID solicitado ya pertenece a otro usuario. Node se descarga
+desde `nodejs.org` y se valida con SHA-256. Al cambiar `NODE_VERSION`, actualiza
+también `NODE_SHA256`; usa `NODE_TAG` para el tag visible:
+
+```sh
+NODE_VERSION=24.21.0 NODE_SHA256=<SHA256> NODE_TAG=24 \
+  docker buildx bake -f docker/jenkins-agents/docker-bake.hcl node
+```
+
+Publica tags versionados en el registry local, sin una barra final en
+`REGISTRY`. `latest` es opcional:
+
+```sh
+REGISTRY=<SERVER_LAN_IP>:5000 \
+  docker buildx bake -f docker/jenkins-agents/docker-bake.hcl --push
+REGISTRY=<SERVER_LAN_IP>:5000 PUBLISH_LATEST=true \
+  docker buildx bake -f docker/jenkins-agents/docker-bake.hcl --push
+```
+
+Comprueba las imágenes sin iniciar Jenkins Remoting:
+
+```sh
+docker run --rm --entrypoint rsync jenkins-agent-rsync:1 --version
+docker run --rm --entrypoint ssh jenkins-agent-rsync:1 -V
+docker run --rm --entrypoint docker jenkins-agent-rsync:1 --version
+docker run --rm --entrypoint id jenkins-agent-rsync:1
+
+docker run --rm --entrypoint node jenkins-agent-node:24 --version
+docker run --rm --entrypoint npm jenkins-agent-node:24 --version
+docker run --rm --entrypoint git jenkins-agent-node:24 --version
+docker run --rm --entrypoint docker jenkins-agent-node:24 --version
+```
+
+La configuración posterior de Jenkins Docker Plugin usará estas plantillas; no
+está automatizada todavía:
+
+```text
+label: rsync   image: <registry>/jenkins-agent-rsync:1
+label: node    image: <registry>/jenkins-agent-node:24
 ```
 
 Samba gestiona únicamente `[data]` desde el fragmento
@@ -306,9 +410,12 @@ sudo docker node ls
 sudo docker info --format '{{.Swarm.LocalNodeState}}'
 sudo docker network ls --filter name=public-ingress
 sudo docker network inspect public-ingress --format '{{.Driver}} {{.Attachable}}'
+sudo docker network inspect jenkins-agents --format '{{.Driver}} {{.Attachable}}'
 sudo docker secret ls --filter name=cloudflared_token
 sudo docker service ps cloudflared
-sudo systemctl status jenkins
+sudo docker service ps jenkins
+sudo docker service logs --tail 100 jenkins
+curl http://<SERVER_LAN_IP>:8080/login
 curl http://<SERVER_LAN_IP>:5000/v2/
 ```
 
