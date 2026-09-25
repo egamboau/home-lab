@@ -1,0 +1,105 @@
+---
+- name: Gestionar Samba en los servidores de almacenamiento
+  hosts: storage
+  become: true
+  pre_tasks:
+    - name: Comprobar que existe la configuración de este servidor en Ansible
+      ansible.builtin.assert:
+        that: "lookup('ansible.builtin.file', 'files/samba/' ~ inventory_hostname ~ '/smb.conf') | length > 0"
+        fail_msg: Añade el smb.conf real de este host en playbooks/files/samba/<host>/smb.conf.
+
+    - name: Comprobar que el pool está montado
+      ansible.builtin.command: findmnt --mountpoint /mnt/data --types fuse.mergerfs
+      changed_when: false
+      check_mode: false
+
+  tasks:
+    - name: Instalar Samba y su validador
+      ansible.builtin.apt:
+        name:
+          - samba
+          - samba-common-bin
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        fail_on_autoremove: true
+
+    - name: Leer la configuración actual de Samba
+      ansible.builtin.slurp:
+        src: /etc/samba/smb.conf
+      register: samba_current
+
+    - name: Adoptar el bloque data existente sin duplicarlo
+      ansible.builtin.replace:
+        path: /etc/samba/smb.conf
+        regexp: '(?im)^[ \t]*\[data\][^\n]*(?:\n(?![ \t]*\[)[^\n]*)*'
+        replace: '# BEGIN ANSIBLE MANAGED DATA\n\g<0>\n# END ANSIBLE MANAGED DATA\n'
+        backup: true
+        validate: /usr/bin/testparm -s %s
+      when: "'# BEGIN ANSIBLE MANAGED DATA' not in (samba_current.content | b64decode)"
+
+    - name: Retirar bloques marcados duplicados conservando el último
+      ansible.builtin.replace:
+        path: /etc/samba/smb.conf
+        regexp: '(?ms)^# BEGIN ANSIBLE MANAGED DATA\r?\n.*?^# END ANSIBLE MANAGED DATA\r?(?:\n|\Z)(?=.*^# BEGIN ANSIBLE MANAGED DATA\r?$)'
+        replace: ''
+        backup: true
+        validate: /usr/bin/testparm -s %s
+      notify: Recargar Samba
+
+    - name: Completar el salto de línea del marcador final si falta
+      ansible.builtin.replace:
+        path: /etc/samba/smb.conf
+        regexp: '(?m)^# END ANSIBLE MANAGED DATA\Z'
+        replace: '# END ANSIBLE MANAGED DATA\n'
+        backup: true
+        validate: /usr/bin/testparm -s %s
+
+    - name: Gestionar solo el bloque data y conservar el resto de smb.conf
+      ansible.builtin.blockinfile:
+        path: /etc/samba/smb.conf
+        marker: '# {mark} ANSIBLE MANAGED DATA'
+        block: "{{ lookup('ansible.builtin.file', 'files/samba/' ~ inventory_hostname ~ '/smb.conf') }}"
+        backup: true
+        validate: /usr/bin/testparm -s %s
+      notify: Recargar Samba
+
+    - name: Crear directorio de configuración de smbd en systemd
+      ansible.builtin.file:
+        path: /etc/systemd/system/smbd.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Hacer que smbd espere al pool durante el arranque
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/smbd.service.d/storage.conf
+        mode: '0644'
+        content: |
+          [Unit]
+          RequiresMountsFor=/mnt/data
+      notify: Reiniciar smbd
+
+    - name: Mantener habilitados los servicios Samba actuales
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - smbd
+        - nmbd
+
+  handlers:
+    - name: Reiniciar smbd
+      ansible.builtin.systemd_service:
+        name: smbd
+        daemon_reload: true
+        state: restarted
+
+    - name: Recargar Samba
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        state: reloaded
+      loop:
+        - smbd
+        - nmbd

@@ -1,0 +1,19 @@
+---
+all:
+  hosts:
+    server1:
+      ansible_host: '<SERVER_IP_OR_HOSTNAME>' # IP para la primera conexión.
+      ansible_user: '<SSH_USER>'
+      server_hostname: '<SERVER_HOSTNAME>' # Nombre corto, sin .local, único en la LAN.
+  children:
+    container:
+      hosts:
+        server1:
+          swarm_advertise_addr: '<SERVER_LAN_IP>' # IP fija o reserva DHCP.
+    storage:
+      hosts:
+        server1:
+          mergerfs_disks:
+            - uuid: '<DISK_UUID>'
+              path: '/srv/disks/<DISK_NAME>'
+              fstype: '<FILESYSTEM_TYPE>' # ext4, xfs o btrfs.

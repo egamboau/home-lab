@@ -1,0 +1,72 @@
+---
+- name: Montar discos existentes y unirlos con mergerfs
+  hosts: storage
+  become: true
+  pre_tasks:
+    - name: Validar plataforma y lista de discos antes de modificar el servidor
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+          - mergerfs_disks | default([]) | length > 0
+          - mergerfs_disks | map(attribute='uuid') | unique | length == mergerfs_disks | length
+          - mergerfs_disks | map(attribute='path') | unique | length == mergerfs_disks | length
+        fail_msg: Configura discos existentes con UUID únicos en inventory.yml.
+
+    - name: Validar cada disco y restringir sus puntos de montaje
+      ansible.builtin.assert:
+        that:
+          - item.uuid is match('^[A-Fa-f0-9-]+$')
+          - item.path is match('^/(srv/disks|mnt)/[A-Za-z0-9_-]+$')
+          - item.path != '/mnt/data'
+          - item.fstype in ['ext4', 'xfs', 'btrfs']
+      loop: '{{ mergerfs_disks }}'
+
+    - name: Comprobar que todos los UUID existen antes de montar
+      ansible.builtin.stat:
+        path: '/dev/disk/by-uuid/{{ item.uuid }}'
+      loop: '{{ mergerfs_disks }}'
+      register: disk_devices
+
+    - name: Rechazar discos ausentes
+      ansible.builtin.assert:
+        that: item.stat.exists
+        fail_msg: 'No existe el disco {{ item.item.uuid }}; no se modifica el almacenamiento.'
+      loop: '{{ disk_devices.results }}'
+      loop_control:
+        label: '{{ item.item.uuid }}'
+
+  tasks:
+    - name: Instalar mergerfs desde Debian
+      ansible.builtin.apt:
+        name: mergerfs
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Montar cada disco y persistirlo en fstab
+      ansible.posix.mount:
+        path: '{{ item.path }}'
+        src: 'UUID={{ item.uuid }}'
+        fstype: '{{ item.fstype }}'
+        opts: defaults
+        state: mounted
+      loop: '{{ mergerfs_disks }}'
+      notify: Recargar systemd
+
+    - name: Montar el pool después de sus discos
+      ansible.posix.mount:
+        path: /mnt/data
+        src: "{{ mergerfs_disks | map(attribute='path') | join(':') }}"
+        fstype: fuse.mergerfs
+        opts: "defaults,allow_other,use_ino,noforget,inodecalc=path-hash,category.create=mfs,minfreespace=10G,fsname=mergerfs,{{ mergerfs_disks | map(attribute='path') | map('regex_replace', '^', 'x-systemd.requires=') | join(',') }}"
+        state: '{{ item }}'
+      # Actualiza fstab sin intentar cambiar opciones FUSE de un pool en uso.
+      # Un pool ya montado necesita reiniciar el host para aplicar opciones nuevas.
+      loop: [present, mounted]
+      notify: Recargar systemd
+
+  handlers:
+    - name: Recargar systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true

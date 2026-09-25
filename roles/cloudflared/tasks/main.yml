@@ -1,0 +1,48 @@
+---
+- name: Comprobar el archivo local del token de Cloudflare Tunnel
+  ansible.builtin.stat:
+    path: '{{ cloudflared_token_file }}'
+  delegate_to: localhost
+  become: false
+  register: cloudflared_token
+
+- name: Exigir un archivo local no vacío para el token
+  ansible.builtin.assert:
+    that:
+      - cloudflared_token.stat.exists
+      - cloudflared_token.stat.isreg
+      - cloudflared_token.stat.size > 0
+    fail_msg: 'Crea {{ cloudflared_token_file }} con el token de Cloudflare Tunnel; el archivo está ignorado por Git.'
+
+- name: Guardar el token como Docker secret versionado
+  community.docker.docker_secret:
+    name: cloudflared_token
+    data: "{{ lookup('ansible.builtin.file', cloudflared_token_file) | trim }}"
+    rolling_versions: true
+    versions_to_keep: 2
+    state: present
+  register: cloudflared_token_secret
+  no_log: true
+
+- name: Desplegar cloudflared en el Swarm
+  community.docker.docker_swarm_service:
+    name: cloudflared
+    image: '{{ cloudflared_image }}'
+    args:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token-file
+      - /run/secrets/cloudflared_token
+    networks:
+      - '{{ cloudflared_network }}'
+    secrets:
+      - secret_name: '{{ cloudflared_token_secret.secret_name }}'
+        filename: /run/secrets/cloudflared_token
+        mode: 0444
+    mode: replicated
+    replicas: 1
+    restart_config:
+      condition: any
+      delay: 5s
+    state: present

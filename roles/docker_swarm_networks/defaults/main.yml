@@ -1,0 +1,5 @@
+---
+docker_swarm_networks:
+  - name: public-ingress
+    driver: overlay
+    attachable: true

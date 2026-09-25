@@ -1,0 +1,8 @@
+---
+local_docker_registry_image: registry:3
+local_docker_registry_data_directory: /srv/docker-registry
+local_docker_registry_address: '{{ swarm_advertise_addr }}'
+local_docker_registry_port: 5000
+local_docker_registry_insecure_endpoints:
+  - '{{ local_docker_registry_address }}:{{ local_docker_registry_port }}'
+  - '{{ server_hostname }}.local:{{ local_docker_registry_port }}'

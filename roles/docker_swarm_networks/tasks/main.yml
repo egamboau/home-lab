@@ -1,0 +1,53 @@
+---
+- name: Comprobar que Docker está disponible
+  community.docker.docker_host_info:
+  register: docker_swarm_host
+  failed_when: false
+
+- name: Rechazar un host sin Docker disponible
+  ansible.builtin.assert:
+    that: docker_swarm_host.can_talk_to_docker | default(false)
+    fail_msg: 'Docker no está disponible: {{ docker_swarm_host.msg | default("no se pudo contactar con el daemon") }}.'
+
+- name: Comprobar que el nodo pertenece a un Swarm
+  ansible.builtin.assert:
+    that: docker_swarm_host.host_info.Swarm.LocalNodeState | default('inactive') == 'active'
+    fail_msg: Este host no pertenece a un Docker Swarm activo; el role no inicializa ni modifica el Swarm.
+
+- name: Comprobar que el nodo es manager
+  ansible.builtin.assert:
+    that: docker_swarm_host.host_info.Swarm.ControlAvailable | default(false) | bool
+    fail_msg: Este host pertenece al Swarm, pero no es manager; las redes compartidas solo se crean desde un manager.
+
+- name: Inspeccionar las redes compartidas
+  community.docker.docker_network_info:
+    name: '{{ item.name }}'
+  loop: '{{ docker_swarm_networks }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: docker_swarm_network_info
+
+- name: Rechazar redes existentes con otra configuración
+  ansible.builtin.assert:
+    that:
+      - not item.exists or item.network.Driver == (item.item.driver | default('overlay'))
+      - not item.exists or item.network.Scope == 'swarm'
+      - not item.exists or (item.network.Attachable | bool) == (item.item.attachable | default(true) | bool)
+    fail_msg: >-
+      La red {{ item.item.name }} ya existe con otra configuración; no se recreará para evitar afectar servicios conectados.
+  loop: '{{ docker_swarm_network_info.results }}'
+  loop_control:
+    label: '{{ item.item.name }}'
+
+- name: Crear las redes compartidas que faltan
+  community.docker.docker_network:
+    name: '{{ item.item.name }}'
+    driver: "{{ item.item.driver | default('overlay') }}"
+    scope: swarm
+    attachable: "{{ item.item.attachable | default(true) }}"
+    appends: true
+    state: present
+  when: not item.exists
+  loop: '{{ docker_swarm_network_info.results }}'
+  loop_control:
+    label: '{{ item.item.name }}'

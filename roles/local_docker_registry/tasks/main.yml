@@ -1,0 +1,66 @@
+---
+- name: Validar la configuración del registro Docker local
+  ansible.builtin.assert:
+    that:
+      - local_docker_registry_data_directory is match('^/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$')
+      - local_docker_registry_data_directory != '/mnt/data'
+      - local_docker_registry_address == swarm_advertise_addr
+      - local_docker_registry_port | int > 0
+      - local_docker_registry_port | int < 65536
+      - local_docker_registry_insecure_endpoints | length > 0
+
+- name: Comprobar la configuración actual de Docker
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  register: docker_daemon_config_file
+
+- name: Leer la configuración actual de Docker
+  ansible.builtin.slurp:
+    path: /etc/docker/daemon.json
+  register: docker_daemon_config_contents
+  when: docker_daemon_config_file.stat.exists
+
+- name: Conservar la configuración actual de Docker
+  ansible.builtin.set_fact:
+    docker_daemon_config: >-
+      {{ (docker_daemon_config_contents.content | b64decode | from_json)
+         if docker_daemon_config_file.stat.exists else {} }}
+
+- name: Permitir el registro HTTP local en Docker
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+    content: >-
+      {{ docker_daemon_config | combine({
+           'insecure-registries': ((docker_daemon_config['insecure-registries'] | default([]))
+                                   + local_docker_registry_insecure_endpoints) | unique | list
+         }) | to_nice_json }}
+  register: docker_registry_daemon_config
+
+- name: Reiniciar Docker para aplicar el registro HTTP local
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted
+  when: docker_registry_daemon_config.changed
+
+- name: Crear el directorio local del registro
+  ansible.builtin.file:
+    path: '{{ local_docker_registry_data_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ejecutar el registro Docker local
+  community.docker.docker_container:
+    name: local-registry
+    image: '{{ local_docker_registry_image }}'
+    pull: missing
+    published_ports:
+      - '{{ local_docker_registry_address }}:{{ local_docker_registry_port }}:5000'
+    volumes:
+      - '{{ local_docker_registry_data_directory }}:/var/lib/registry'
+    env:
+      OTEL_TRACES_EXPORTER: 'none'
+    restart_policy: always
+    state: started

@@ -1,0 +1,4 @@
+---
+cloudflared_image: cloudflare/cloudflared:latest
+cloudflared_network: public-ingress
+cloudflared_token_file: '{{ inventory_dir }}/secrets/cloudflared_token'

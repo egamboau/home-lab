@@ -1,0 +1,4 @@
+# Gestionado por Ansible: solo IPs de hosts container.
+/mnt/data{% for host in groups['container'] %} {{ hostvars[host].swarm_advertise_addr }}(rw,sync,no_subtree_check,mountpoint,no_root_squash,fsid={{ (inventory_hostname ~ ':/mnt/data') | to_uuid }}){% endfor %}
+
+/mnt/data/tournament{% for host in groups['container'] %} {{ hostvars[host].swarm_advertise_addr }}(rw,sync,no_root_squash,no_subtree_check,fsid={{ (inventory_hostname ~ ':/mnt/data/tournament') | to_uuid }}){% endfor %}

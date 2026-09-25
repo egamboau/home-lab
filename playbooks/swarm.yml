@@ -1,0 +1,115 @@
+---
+- name: Instalar Docker en los servidores de contenedores
+  hosts: container
+  become: true
+  pre_tasks:
+    - name: Validar Debian e IP de Swarm
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+          - swarm_advertise_addr | default('') | length > 0
+        fail_msg: Configura swarm_advertise_addr como IP LAN fija.
+
+    - name: Comprobar que el pool está montado antes de instalar Docker
+      ansible.builtin.command: findmnt --mountpoint /mnt/data --types fuse.mergerfs
+      changed_when: false
+      check_mode: false
+      when: "'storage' in group_names"
+
+  tasks:
+    - name: Instalar Docker desde el repositorio oficial
+      ansible.builtin.import_tasks: tasks/docker.yml
+
+    - name: Crear directorio de configuración de systemd para Docker
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Hacer que Docker espere al pool durante el arranque
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/storage.conf
+        mode: '0644'
+        content: |
+          [Unit]
+          RequiresMountsFor=/mnt/data
+      when: "'storage' in group_names"
+      notify: Reiniciar Docker
+
+    - name: Retirar la dependencia del pool en servidores sin rol storage
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d/storage.conf
+        state: absent
+      when: "'storage' not in group_names"
+      notify: Reiniciar Docker
+
+    - name: Aplicar dependencias antes de inicializar Swarm
+      ansible.builtin.meta: flush_handlers
+
+    - name: Habilitar Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reiniciar Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        daemon_reload: true
+        state: restarted
+
+- name: Inicializar el primer servidor container como manager
+  hosts: container[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Inicializar el manager sin reemplazar un Swarm existente
+      community.docker.docker_swarm:
+        state: present
+        advertise_addr: '{{ swarm_advertise_addr }}'
+      no_log: true
+
+    - name: Crear las redes compartidas del Swarm
+      ansible.builtin.include_role:
+        name: docker_swarm_networks
+
+    - name: Desplegar Cloudflare Tunnel
+      ansible.builtin.include_role:
+        name: cloudflared
+
+    - name: Instalar Jenkins en el manager
+      ansible.builtin.include_role:
+        name: jenkins
+
+    - name: Instalar el registro Docker local en el manager
+      ansible.builtin.include_role:
+        name: local_docker_registry
+
+    - name: Obtener el token para incorporar workers
+      community.docker.docker_swarm_info:
+      register: swarm_info
+      when: groups['container'] | length > 1
+      no_log: true
+
+- name: Incorporar los demás servidores container al mismo Swarm
+  hosts: container:!container[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Comprobar que el manager participó en esta ejecución
+      ansible.builtin.assert:
+        that:
+          - hostvars[groups['container'][0]].swarm_info is defined
+          - hostvars[groups['container'][0]].swarm_info.swarm_facts is defined
+        fail_msg: Incluye el primer host de container en la ejecución para obtener el token de unión.
+
+    - name: Unir el servidor como worker
+      community.docker.docker_swarm:
+        state: join
+        advertise_addr: '{{ swarm_advertise_addr }}'
+        remote_addrs:
+          - "{{ hostvars[groups['container'][0]].swarm_advertise_addr }}:2377"
+        join_token: "{{ hostvars[groups['container'][0]].swarm_info.swarm_facts.JoinTokens.Worker }}"
+      no_log: true

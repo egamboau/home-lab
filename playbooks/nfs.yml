@@ -1,0 +1,103 @@
+---
+- name: Exportar el pool a los hosts container
+  hosts: storage
+  become: true
+  pre_tasks:
+    - name: Exigir clientes container explícitos
+      ansible.builtin.assert:
+        that: groups.get('container', []) | length > 0
+
+    - name: Validar las IP IPv4 autorizadas sin comodines ni subredes
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].swarm_advertise_addr | default('') is match('^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')
+        fail_msg: Cada host container necesita swarm_advertise_addr con su IP LAN IPv4 fija.
+      loop: "{{ groups['container'] }}"
+
+    - name: Comprobar el pool antes de exportarlo
+      ansible.builtin.command: findmnt --mountpoint /mnt/data --types fuse.mergerfs
+      changed_when: false
+      check_mode: false
+
+  tasks:
+    - name: Instalar el servidor NFS
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Crear los directorios de configuración NFS
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/exports.d
+        - /etc/nfs.conf.d
+        - /etc/systemd/system/nfs-server.service.d
+
+    - name: Crear el directorio NFS tournament
+      ansible.builtin.file:
+        path: /mnt/data/tournament
+        state: directory
+        owner: '1000'
+        group: '1000'
+        mode: '0770'
+
+    - name: Usar NFSv4 por TCP
+      ansible.builtin.copy:
+        dest: /etc/nfs.conf.d/home-server.conf
+        mode: '0644'
+        content: |
+          [nfsd]
+          vers3=n
+          vers4=y
+          udp=n
+      notify: Reiniciar NFS
+
+    - name: Hacer que NFS espere al pool
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nfs-server.service.d/storage.conf
+        mode: '0644'
+        content: |
+          [Unit]
+          RequiresMountsFor=/mnt/data
+      notify: Reiniciar NFS
+
+    - name: Exportar data solo a los clientes del inventario
+      ansible.builtin.template:
+        src: nfs-data.exports.j2
+        dest: /etc/exports.d/home-server.exports
+        mode: '0644'
+        backup: true
+      notify: Actualizar exportaciones NFS
+
+    - name: Habilitar NFS
+      ansible.builtin.systemd_service:
+        name: nfs-server
+        state: started
+        enabled: true
+        daemon_reload: true
+
+  handlers:
+    - name: Reiniciar NFS
+      ansible.builtin.systemd_service:
+        name: nfs-server
+        daemon_reload: true
+        state: restarted
+
+    - name: Actualizar exportaciones NFS
+      ansible.builtin.command: exportfs -ra
+      changed_when: true
+
+- name: Preparar los clientes NFS de Swarm
+  hosts: container
+  become: true
+  tasks:
+    - name: Instalar herramientas cliente NFS
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+        update_cache: true
+        cache_valid_time: 3600

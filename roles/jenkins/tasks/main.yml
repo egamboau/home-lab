@@ -1,0 +1,70 @@
+---
+- name: Comprobar si existe el timer GHCR anterior
+  ansible.builtin.stat:
+    path: /etc/systemd/system/swarm-stack-update.timer
+  register: old_stack_updater_timer
+
+- name: Detener el timer GHCR anterior
+  ansible.builtin.systemd_service:
+    name: swarm-stack-update.timer
+    enabled: false
+    state: stopped
+  when: old_stack_updater_timer.stat.exists
+
+- name: Retirar el actualizador GHCR anterior
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - /etc/systemd/system/swarm-stack-update.timer
+    - /etc/systemd/system/swarm-stack-update.service
+    - /usr/local/sbin/swarm-stack-update
+    - /etc/swarm-stack-updater
+  register: old_stack_updater_files
+
+- name: Recargar systemd después de retirar el actualizador anterior
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: old_stack_updater_files.changed
+
+- name: Instalar Java antes de Jenkins
+  ansible.builtin.apt:
+    name:
+      - fontconfig
+      - openjdk-21-jre
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Descargar la clave del repositorio Jenkins LTS
+  ansible.builtin.get_url:
+    url: '{{ jenkins_repository_key_url }}'
+    dest: /etc/apt/keyrings/jenkins-keyring.asc
+    mode: '0644'
+
+- name: Configurar el repositorio Jenkins LTS
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/jenkins.list
+    mode: '0644'
+    content: |
+      deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+
+- name: Instalar o actualizar Jenkins
+  ansible.builtin.apt:
+    name: jenkins
+    state: latest
+    update_cache: true
+
+- name: Permitir que Jenkins use Docker
+  ansible.builtin.user:
+    name: jenkins
+    groups: docker
+    append: true
+  register: jenkins_docker_access
+
+- name: Habilitar Jenkins
+  ansible.builtin.systemd_service:
+    name: jenkins
+    enabled: true
+    daemon_reload: true
+    state: "{{ 'restarted' if jenkins_docker_access.changed else 'started' }}"

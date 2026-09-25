@@ -1,0 +1,5 @@
+inventory.yml
+secrets/*
+*.retry
+.venv/
+__pycache__/

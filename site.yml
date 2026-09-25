@@ -1,0 +1,11 @@
+---
+- name: Configurar servicios comunes
+  ansible.builtin.import_playbook: playbooks/common.yml
+- name: Configurar almacenamiento
+  ansible.builtin.import_playbook: playbooks/storage.yml
+- name: Configurar archivos compartidos
+  ansible.builtin.import_playbook: playbooks/samba.yml
+- name: Configurar NFS
+  ansible.builtin.import_playbook: playbooks/nfs.yml
+- name: Configurar contenedores
+  ansible.builtin.import_playbook: playbooks/swarm.yml

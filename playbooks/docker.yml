@@ -1,0 +1,13 @@
+---
+- name: Instalar o recuperar Docker CE desde su repositorio oficial
+  hosts: container
+  become: true
+  pre_tasks:
+    - name: Validar Debian 13
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Debian'
+          - ansible_facts.distribution_major_version == '13'
+  tasks:
+    - name: Configurar Docker CE
+      ansible.builtin.import_tasks: tasks/docker.yml
