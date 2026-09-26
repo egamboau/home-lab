@@ -8,6 +8,7 @@ plays = yaml.safe_load((root / 'playbooks/swarm.yml').read_text())
 jenkins = yaml.safe_load((root / 'roles/jenkins/tasks/main.yml').read_text())
 registry = yaml.safe_load((root / 'roles/local_docker_registry/tasks/main.yml').read_text())
 dockerfile = (root / 'docker/jenkins-agents/Dockerfile').read_text()
+bake = (root / 'docker/jenkins-agents/docker-bake.hcl').read_text()
 controller_dockerfile = (root / 'docker/jenkins-controller/Dockerfile').read_text()
 manager_roles = [
     task['ansible.builtin.include_role']['name']
@@ -54,7 +55,7 @@ assert controller_build['build']['args']['JENKINS_GID'] == '{{ jenkins_gid.stdou
 assert version_check['argv'][3:5] == ['--entrypoint', 'java']
 assert version_check['argv'][-3:] == ['-jar', '/usr/share/jenkins/jenkins.war', '--version']
 assert uid_check['argv'][-3:] == ['id', '{{ jenkins_runtime_image }}', '-u']
-assert {'rsync', 'node'} <= {item['target'] for item in next(task for task in jenkins
+assert {'base', 'rsync', 'node'} <= {item['target'] for item in next(task for task in jenkins
                                                               if task['name'] == 'Construir y publicar las imágenes de agentes Jenkins')['loop']}
 assert native_stop == {'name': 'jenkins', 'enabled': False, 'state': 'stopped'}
 assert service['image'] == '{{ jenkins_runtime_image }}'
@@ -67,6 +68,7 @@ assert service['mounts'] == [
 assert service['placement']['constraints'] == ['node.hostname == {{ server_hostname }}']
 assert service['replicas'] == 1 and service['update_config']['order'] == 'stop-first'
 assert {port['target_port'] for port in service['publish']} == {8080, 50000}
+assert 'targets = ["base", "rsync", "node"]' in bake and 'jenkins-agent-base:' in bake
 assert 'FROM base AS rsync' in dockerfile and 'FROM base AS node' in dockerfile
 assert 'ENV REMOTING_OPTS="-workDir /tmp/jenkins-agent"' in dockerfile
 assert 'JENKINS_AGENT_WORKDIR' not in dockerfile

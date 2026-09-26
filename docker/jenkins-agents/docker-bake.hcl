@@ -2,6 +2,10 @@ variable "REGISTRY" {
   default = ""
 }
 
+variable "BASE_TAG" {
+  default = "1"
+}
+
 variable "RSYNC_TAG" {
   default = "1"
 }
@@ -31,13 +35,22 @@ variable "PUBLISH_LATEST" {
 }
 
 group "default" {
-  targets = ["rsync", "node"]
+  targets = ["base", "rsync", "node"]
 }
 
 target "_common" {
   context    = "docker/jenkins-agents"
   dockerfile = "Dockerfile"
   platforms  = ["linux/amd64"]
+}
+
+target "base" {
+  inherits = ["_common"]
+  target   = "base"
+  tags = concat(
+    ["${REGISTRY != "" ? "${REGISTRY}/" : ""}jenkins-agent-base:${BASE_TAG}"],
+    PUBLISH_LATEST ? ["${REGISTRY != "" ? "${REGISTRY}/" : ""}jenkins-agent-base:latest"] : []
+  )
 }
 
 target "rsync" {

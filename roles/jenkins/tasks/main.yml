@@ -121,6 +121,7 @@
     mode: '0644'
     content: |
       registry={{ jenkins_agent_registry }}
+      base_tag={{ jenkins_agent_base_tag }}
       rsync_tag={{ jenkins_agent_rsync_tag }}
       rsync_uid={{ jenkins_agent_rsync_uid | default(jenkins_uid.stdout, true) }}
       rsync_gid={{ jenkins_agent_rsync_gid | default(jenkins_gid.stdout, true) }}
@@ -145,6 +146,9 @@
       pull: true
       args: '{{ item.args }}'
   loop:
+    - target: base
+      tag: '{{ jenkins_agent_base_tag }}'
+      args: {}
     - target: rsync
       tag: '{{ jenkins_agent_rsync_tag }}'
       args:

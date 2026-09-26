@@ -115,9 +115,9 @@ sudo docker ps --filter name=local-registry
 
 ## Agentes efímeros de Jenkins
 
-`docker/jenkins-agents/Dockerfile` define dos plantillas para Jenkins Docker
+`docker/jenkins-agents/Dockerfile` define tres plantillas para Jenkins Docker
 Plugin. El controller
-solicita el label `rsync` o `node`, el plugin crea el agente inbound, ejecuta el
+solicita el label `base`, `rsync` o `node`, el plugin crea el agente inbound, ejecuta el
 pipeline y elimina el contenedor al terminar:
 
 ```text
@@ -134,16 +134,19 @@ Incluyen Docker CLI y Buildx para conectarse a un daemon externo; no incluyen ni
 ejecutan Docker Engine. No guardes claves SSH, tokens del registry ni otras
 credenciales en las imágenes: inyéctalas desde Jenkins durante cada build.
 
-Construye las dos imágenes o un solo target:
+Construye las tres imágenes o un solo target. `base` incluye Git, curl, Docker
+CLI y Buildx para desplegar stacks desde un agente efímero:
 
 ```sh
 docker buildx bake -f docker/jenkins-agents/docker-bake.hcl
+docker buildx bake -f docker/jenkins-agents/docker-bake.hcl base
 docker buildx bake -f docker/jenkins-agents/docker-bake.hcl rsync
 docker buildx bake -f docker/jenkins-agents/docker-bake.hcl node
 ```
 
-Por defecto se generan `jenkins-agent-rsync:1` y `jenkins-agent-node:24` para
-`linux/amd64`. Para ajustar el UID/GID del agente rsync a los archivos montados:
+Por defecto se generan `jenkins-agent-base:1`, `jenkins-agent-rsync:1` y
+`jenkins-agent-node:24` para `linux/amd64`. Para ajustar el UID/GID del agente
+rsync a los archivos montados:
 
 ```sh
 JENKINS_UID="$(id -u)" JENKINS_GID="$(id -g)" \
@@ -173,6 +176,9 @@ REGISTRY=<SERVER_LAN_IP>:5000 PUBLISH_LATEST=true \
 Comprueba las imágenes sin iniciar Jenkins Remoting:
 
 ```sh
+docker run --rm --entrypoint docker jenkins-agent-base:1 --version
+docker run --rm --entrypoint git jenkins-agent-base:1 --version
+
 docker run --rm --entrypoint rsync jenkins-agent-rsync:1 --version
 docker run --rm --entrypoint ssh jenkins-agent-rsync:1 -V
 docker run --rm --entrypoint docker jenkins-agent-rsync:1 --version
@@ -188,6 +194,7 @@ La configuración posterior de Jenkins Docker Plugin usará estas plantillas; no
 está automatizada todavía:
 
 ```text
+label: base    image: <registry>/jenkins-agent-base:1
 label: rsync   image: <registry>/jenkins-agent-rsync:1
 label: node    image: <registry>/jenkins-agent-node:24
 ```

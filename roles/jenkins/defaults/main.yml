@@ -9,6 +9,7 @@ jenkins_controller_build_directory: /etc/jenkins-controller-image
 jenkins_controller_tag: lts-jdk21
 jenkins_agent_build_directory: /etc/jenkins-agent-images
 jenkins_agent_registry: '{{ local_docker_registry_address }}:{{ local_docker_registry_port }}'
+jenkins_agent_base_tag: '1'
 jenkins_agent_rsync_tag: '1'
 jenkins_agent_rsync_uid: ''
 jenkins_agent_rsync_gid: ''
